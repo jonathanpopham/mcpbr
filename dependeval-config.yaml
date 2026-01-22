@@ -1,0 +1,24 @@
+# mcpbr config for DependEval benchmark with Supermodel MCP
+# Tests dependency understanding - perfect fit for code graph analysis
+
+mcp_server:
+  command: npx
+  args:
+    - "-y"
+    - "@supermodeltools/mcp-server"
+  env:
+    SUPERMODEL_API_KEY: ${SUPERMODEL_API_KEY}
+    SUPERMODEL_BASE_URL: ${SUPERMODEL_BASE_URL}
+
+provider: anthropic
+agent_harness: claude-code
+model: sonnet
+benchmark: dependeval
+sample_size: 3
+timeout_seconds: 300
+max_concurrent: 1
+max_iterations: 15
+
+# DependEval-specific options
+dependeval_task_type: dr  # Options: dr (Dependency Recognition), rc (Repository Construction), me (Multi-file Editing)
+# dependeval_languages: [python, java, javascript]  # Filter by language (default: all)

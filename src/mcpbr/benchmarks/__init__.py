@@ -4,6 +4,7 @@ from typing import Any
 
 from .base import Benchmark, BenchmarkTask
 from .cybergym import CyberGymBenchmark
+from .dependeval import DependEvalBenchmark
 from .mcptoolbench import MCPToolBenchmark
 from .swebench import SWEBenchmark
 
@@ -13,16 +14,18 @@ __all__ = [
     "SWEBenchmark",
     "CyberGymBenchmark",
     "MCPToolBenchmark",
+    "DependEvalBenchmark",
     "BENCHMARK_REGISTRY",
     "create_benchmark",
     "list_benchmarks",
 ]
 
 
-BENCHMARK_REGISTRY: dict[str, type[SWEBenchmark | CyberGymBenchmark | MCPToolBenchmark]] = {
+BENCHMARK_REGISTRY: dict[str, type[SWEBenchmark | CyberGymBenchmark | MCPToolBenchmark | DependEvalBenchmark]] = {
     "swe-bench": SWEBenchmark,
     "cybergym": CyberGymBenchmark,
     "mcptoolbench": MCPToolBenchmark,
+    "dependeval": DependEvalBenchmark,
 }
 
 

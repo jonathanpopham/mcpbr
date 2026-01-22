@@ -234,15 +234,16 @@ def print_summary(results: "EvaluationResults", console: Console) -> None:
 
     if total_diff is not None:
         console.print()
+        baseline_cost = baseline.get("total_cost", 0)
         if total_diff > 0:
+            pct_str = f"({abs(total_diff) / baseline_cost * 100:+.1f}%)" if baseline_cost > 0 else "(N/A)"
             console.print(
-                f"[bold]MCP Additional Cost:[/bold] {format_cost(total_diff)} "
-                f"({abs(total_diff) / baseline.get('total_cost', 1) * 100:+.1f}%)"
+                f"[bold]MCP Additional Cost:[/bold] {format_cost(total_diff)} {pct_str}"
             )
         else:
+            pct_str = f"({abs(total_diff) / baseline_cost * 100:.1f}%)" if baseline_cost > 0 else "(N/A)"
             console.print(
-                f"[bold]MCP Cost Savings:[/bold] {format_cost(abs(total_diff))} "
-                f"({abs(total_diff) / baseline.get('total_cost', 1) * 100:.1f}%)"
+                f"[bold]MCP Cost Savings:[/bold] {format_cost(abs(total_diff))} {pct_str}"
             )
 
     if cost_per_additional is not None:
@@ -407,15 +408,16 @@ def save_markdown_report(results: "EvaluationResults", output_path: Path) -> Non
     cost_per_additional = cost_comparison.get("cost_per_additional_resolution")
 
     if total_diff is not None:
+        baseline_cost = baseline.get("total_cost", 0)
         if total_diff > 0:
+            pct_str = f"({abs(total_diff) / baseline_cost * 100:+.1f}%)" if baseline_cost > 0 else "(N/A)"
             lines.append(
-                f"**MCP Additional Cost:** {format_cost(total_diff)} "
-                f"({abs(total_diff) / baseline.get('total_cost', 1) * 100:+.1f}%)"
+                f"**MCP Additional Cost:** {format_cost(total_diff)} {pct_str}"
             )
         else:
+            pct_str = f"({abs(total_diff) / baseline_cost * 100:.1f}%)" if baseline_cost > 0 else "(N/A)"
             lines.append(
-                f"**MCP Cost Savings:** {format_cost(abs(total_diff))} "
-                f"({abs(total_diff) / baseline.get('total_cost', 1) * 100:.1f}%)"
+                f"**MCP Cost Savings:** {format_cost(abs(total_diff))} {pct_str}"
             )
 
     if cost_per_additional is not None:

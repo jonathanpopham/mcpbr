@@ -14,7 +14,7 @@ from .models import DEFAULT_MODEL
 
 VALID_PROVIDERS = ("anthropic",)
 VALID_HARNESSES = ("claude-code",)
-VALID_BENCHMARKS = ("swe-bench", "cybergym", "mcptoolbench")
+VALID_BENCHMARKS = ("swe-bench", "cybergym", "mcptoolbench", "dependeval")
 
 
 class MCPServerConfig(BaseModel):
@@ -96,6 +96,16 @@ class HarnessConfig(BaseModel):
     cybergym_level: int = Field(
         default=1,
         description="CyberGym difficulty level (0-3), controls context given to agent",
+    )
+
+    dependeval_task_type: str = Field(
+        default="dr",
+        description="DependEval task type: 'dr' (Dependency Recognition), 'rc' (Repository Construction), 'me' (Multi-file Editing)",
+    )
+
+    dependeval_languages: list[str] | None = Field(
+        default=None,
+        description="DependEval languages to include (default: all supported)",
     )
 
     sample_size: int | None = Field(

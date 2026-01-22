@@ -107,8 +107,8 @@ def agent_result_to_dict(
         data["messages"] = result.messages
 
     if eval_result:
-        data["resolved"] = eval_result.resolved
-        data["patch_applied"] = eval_result.patch_applied
+        data["resolved"] = getattr(eval_result, "resolved", False)
+        data["patch_applied"] = getattr(eval_result, "patch_applied", False)
 
         if getattr(eval_result, "fail_to_pass", None):
             data["fail_to_pass"] = {
@@ -506,6 +506,10 @@ async def run_evaluation(
             benchmark_kwargs["dataset"] = config.dataset
     if config.benchmark == "cybergym":
         benchmark_kwargs["level"] = config.cybergym_level
+    if config.benchmark == "dependeval":
+        benchmark_kwargs["task_type"] = config.dependeval_task_type
+        if config.dependeval_languages:
+            benchmark_kwargs["languages"] = config.dependeval_languages
 
     benchmark = create_benchmark(config.benchmark, **benchmark_kwargs)
 

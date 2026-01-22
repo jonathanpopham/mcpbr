@@ -287,6 +287,47 @@ async def _get_git_diff_in_docker(env: TaskEnvironment) -> str:
     return ""
 
 
+async def _get_answer_file(env: TaskEnvironment) -> str | None:
+    """Read answer.txt if it exists (for Q&A benchmarks like DependEval).
+
+    Args:
+        env: Docker task environment.
+
+    Returns:
+        Contents of answer.txt stripped, or None if not found/empty.
+    """
+    try:
+        exit_code, content, _ = await env.exec_command(
+            "cat answer.txt 2>/dev/null",
+            timeout=10,
+        )
+        if exit_code == 0 and content.strip():
+            return content.strip()
+    except Exception:
+        pass
+    return None
+
+
+async def _get_answer_file_local(workdir: str) -> str | None:
+    """Read answer.txt if it exists locally (for Q&A benchmarks like DependEval).
+
+    Args:
+        workdir: Working directory path.
+
+    Returns:
+        Contents of answer.txt stripped, or None if not found/empty.
+    """
+    try:
+        answer_path = Path(workdir) / "answer.txt"
+        if answer_path.exists():
+            content = answer_path.read_text().strip()
+            if content:
+                return content
+    except Exception:
+        pass
+    return None
+
+
 async def _write_prompt_file(workdir: str, problem_statement: str) -> str:
     """Write the problem statement to a temporary file.
 
@@ -553,6 +594,12 @@ class ClaudeCodeHarness:
 
             patch = await _get_git_diff(workdir)
 
+            # Fallback for Q&A benchmarks (e.g., DependEval) that write answer.txt
+            if not patch:
+                answer = await _get_answer_file_local(workdir)
+                if answer:
+                    patch = answer  # Use answer as "solution"
+
             return AgentResult(
                 patch=patch,
                 success=bool(patch),
@@ -745,6 +792,12 @@ class ClaudeCodeHarness:
             )
 
             patch = await _get_git_diff_in_docker(env)
+
+            # Fallback for Q&A benchmarks (e.g., DependEval) that write answer.txt
+            if not patch:
+                answer = await _get_answer_file(env)
+                if answer:
+                    patch = answer  # Use answer as "solution"
 
             error_msg = None
             if not patch:
