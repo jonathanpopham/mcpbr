@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dead Code Detection Benchmark**: New benchmark for finding unused code
+  - Compares call graph analysis (Supermodel MCP) vs grep-based search
+  - 3 synthetic tasks (TypeScript, Python, JavaScript) with ground truth
+  - Precision/recall/F1 evaluation metrics
+  - Configuration files for baseline and Supermodel approaches
+  - See `docs/dead-code-benchmark.md` for usage
+
 ### Infrastructure
 
 - Refactored release workflow to auto-bump version after GitHub UI release
