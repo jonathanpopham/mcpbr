@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 3 synthetic tasks (TypeScript, Python, JavaScript) with ground truth
   - Precision/recall/F1 evaluation metrics
   - Configuration files for baseline and Supermodel approaches
+  - Pre-generated call graphs in `.supermodel/graph.json` (implements issue #82 concept)
   - See `docs/dead-code-benchmark.md` for usage
 
 ### Infrastructure
