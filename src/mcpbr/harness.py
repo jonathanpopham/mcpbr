@@ -159,6 +159,12 @@ def agent_result_to_dict(
 
         if getattr(eval_result, "error", None):
             data["eval_error"] = eval_result.error
+
+        # Save dead-code benchmark metrics (precision/recall/F1)
+        for metric in ["precision", "recall", "f1_score", "true_positives",
+                       "false_positives", "false_negatives", "found", "expected"]:
+            if getattr(eval_result, metric, None) is not None:
+                data[metric] = getattr(eval_result, metric)
     else:
         data["resolved"] = False
         data["patch_applied"] = False
@@ -358,7 +364,7 @@ async def _run_mcp_evaluation(
     try:
         # Track Docker environment creation time
         docker_start = time.time()
-        env = await benchmark.create_environment(task, docker_manager)
+        env = await benchmark.create_environment(task, docker_manager, is_mcp=True)
         docker_end = time.time()
         if profiler:
             profiler.record_docker_startup(docker_end - docker_start)
@@ -500,7 +506,7 @@ async def _run_baseline_evaluation(
     try:
         # Track Docker environment creation time
         docker_start = time.time()
-        env = await benchmark.create_environment(task, docker_manager)
+        env = await benchmark.create_environment(task, docker_manager, is_mcp=False)
         docker_end = time.time()
         if profiler:
             profiler.record_docker_startup(docker_end - docker_start)
@@ -1097,6 +1103,7 @@ async def run_evaluation(
             "args": config.mcp_server.args,
             "args_note": "{workdir} is replaced with task repository path at runtime",
         },
+        "prompt_version": config.prompt_version,
     }
 
     # Add incremental evaluation stats if state tracker was used
