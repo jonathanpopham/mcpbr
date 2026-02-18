@@ -585,13 +585,14 @@ class TestSupermodelBenchmark:
         assert "REPORT.json" in prompt
         assert "dead code" in prompt.lower()
 
-    def test_enhanced_prompt_mentions_verify(self) -> None:
+    def test_enhanced_prompt_mentions_verification(self) -> None:
         from mcpbr.benchmarks.supermodel import SupermodelBenchmark
 
         bm = SupermodelBenchmark()
         prompt = bm._generate_enhanced_problem_statement({"language": "typescript"})
-        assert "verify_candidates.py" in prompt
-        assert "PHASE" in prompt
+        assert "barrel" in prompt.lower() or "re-export" in prompt.lower()
+        assert "REPORT.json" in prompt
+        assert "grep" in prompt.lower()
 
 
 # ---------------------------------------------------------------------------

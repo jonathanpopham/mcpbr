@@ -32,117 +32,6 @@ REPORT_PLACEHOLDER = """{
 }
 """
 
-VERIFY_SCRIPT = r'''#!/usr/bin/env python3
-"""Verify dead-code candidates by grepping for external references.
-
-Reads the analysis JSON (single file or manifest+parts), runs
-`grep -rlw <name> .` for each candidate, excludes matches in the
-candidate's own defining file, and outputs only candidates with
-zero external references to verified_candidates.json.
-"""
-
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-TIMEOUT = 30  # seconds per grep call
-
-
-def load_candidates(analysis_path: str) -> list[dict]:
-    """Load candidates from a single file or manifest+parts."""
-    with open(analysis_path) as f:
-        data = json.load(f)
-
-    # Check if this is a manifest (has part_files)
-    if "part_files" in data:
-        candidates = []
-        base_dir = str(Path(analysis_path).parent)
-        for part_file in data["part_files"]:
-            part_path = os.path.join(base_dir, part_file)
-            with open(part_path) as pf:
-                part_data = json.load(pf)
-            for key in ("deadCodeCandidates", "candidates", "items"):
-                if key in part_data:
-                    candidates.extend(part_data[key])
-                    break
-        return candidates
-
-    # Single file: find the candidate list
-    for key in ("deadCodeCandidates", "candidates", "items"):
-        if key in data:
-            return data[key]
-
-    return []
-
-
-def has_external_references(name: str, defining_file: str) -> bool:
-    """Check if `name` appears in any file other than its defining file."""
-    try:
-        result = subprocess.run(
-            ["grep", "-rlw", name, "."],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        # Timeout = assume alive (safe default)
-        return True
-
-    if result.returncode != 0:
-        # grep found nothing
-        return False
-
-    # Normalize the defining file path for comparison
-    def_norm = defining_file.lstrip("./")
-    for line in result.stdout.strip().splitlines():
-        ref_norm = line.strip().lstrip("./")
-        if ref_norm != def_norm:
-            return True
-
-    return False
-
-
-def main() -> None:
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <analysis.json> [--output <file>]", file=sys.stderr)
-        sys.exit(1)
-
-    analysis_path = sys.argv[1]
-    output_path = "verified_candidates.json"
-    if "--output" in sys.argv:
-        idx = sys.argv.index("--output")
-        if idx + 1 < len(sys.argv):
-            output_path = sys.argv[idx + 1]
-
-    candidates = load_candidates(analysis_path)
-    print(f"Loaded {len(candidates)} candidates from {analysis_path}", file=sys.stderr)
-
-    verified = []
-    for i, c in enumerate(candidates):
-        name = c.get("name", "")
-        file_path = c.get("file", "")
-        if not name or not file_path:
-            continue
-
-        if has_external_references(name, file_path):
-            print(f"  [{i+1}/{len(candidates)}] ALIVE: {name} in {file_path}", file=sys.stderr)
-        else:
-            print(f"  [{i+1}/{len(candidates)}] DEAD:  {name} in {file_path}", file=sys.stderr)
-            verified.append(c)
-
-    print(f"\nVerified {len(verified)}/{len(candidates)} candidates as dead", file=sys.stderr)
-
-    with open(output_path, "w") as f:
-        json.dump({"deadCodeCandidates": verified}, f, indent=2)
-    print(f"Wrote {output_path}", file=sys.stderr)
-
-
-if __name__ == "__main__":
-    main()
-'''
-
 DEFAULT_GT_DIR = Path.home() / ".cache" / "mcpbr" / "supermodel_ground_truth"
 
 
@@ -344,8 +233,8 @@ class SupermodelBenchmark:
     def _generate_enhanced_problem_statement(self, task_cfg: dict) -> str:
         """Generate problem statement for the enhanced (graph-assisted) condition.
 
-        The agent gets pre-computed analysis candidates plus a verification script.
-        Three-phase workflow: run verification, review results, write report.
+        The agent gets pre-computed analysis candidates and must manually verify
+        each one by grepping for references in the codebase.
         """
         language = task_cfg.get("language", "typescript")
         analysis_file = self._endpoint.analysis_filename
@@ -357,53 +246,53 @@ class SupermodelBenchmark:
 A call graph analyzer has already identified dead code candidates in
 `{analysis_file}`. Your job is to VERIFY these candidates before reporting them.
 
-Precision matters more than recall. Only include candidates you are confident about.
-
 IMPORTANT: Use the MCP filesystem tools (read_text_file, write_file) for ALL file
 I/O in this task. Do NOT use the built-in Read/Write tools.
 
-== PHASE 1: Run verification script ==
+== STEP 1: Read the candidates ==
 
-ALWAYS run the verification script first:
+Read `{analysis_file}` to get the list of candidates. Each has a file, name, and type.
 
-  python3 verify_candidates.py {analysis_file} --output verified_candidates.json
+== STEP 2: Verify each candidate ==
 
-This script greps for each candidate name across the codebase and removes
-candidates that have references outside their defining file. Wait for it to finish.
-
-If the script fails, manually verify each candidate:
-  For each candidate, run: grep -rlw '<name>' . --include='*{ext}'
-  If the name appears ONLY in its own defining file, it is dead.
-  If it appears in other files, it is alive — do NOT include it.
-
-== PHASE 2: Review verified candidates ==
-
-Read `verified_candidates.json` using the filesystem read_text_file tool.
-Quickly review the list. For suspicious items (very common/short names like
-"get", "set", "init", or candidates in generated/dist files), double-check:
+For EACH candidate, search for its name across the codebase:
 
   grep -rn '<name>' . --include='*{ext}'
 
-Remove any candidate that has legitimate external callers.
+A candidate is DEAD if:
+- It appears ONLY in its own defining file (the "file" field), OR
+- The only other files referencing it are index/barrel files that just re-export it
+  (lines like `export {{ X }} from './...'` or `export * from './...'`)
 
-== PHASE 3: Write REPORT.json ==
+A candidate is ALIVE (do NOT report it) if:
+- It is imported and actually USED in another file (called, referenced in logic,
+  passed as an argument, etc.)
+- It appears in a config, route registration, or framework hook
 
-Write REPORT.json using the filesystem write_file tool with ONLY verified candidates:
+IMPORTANT: barrel/index files that merely re-export a symbol do NOT count as real
+usage. A symbol re-exported through index.ts but never actually imported and used
+by consuming code is still dead.
+
+When in doubt, INCLUDE the candidate — false positives are acceptable, but missing
+real dead code is worse.
+
+== STEP 3: Write REPORT.json ==
+
+Write REPORT.json using the filesystem write_file tool with verified candidates:
 
 {{
   "dead_code": [
-    {{"file": "path/to/file{ext}", "name": "unusedFunc", "type": "function", "reason": "no external references found"}},
+    {{"file": "path/to/file{ext}", "name": "unusedFunc", "type": "function", "reason": "only referenced in own file"}},
     ...
   ],
   "analysis_complete": true
 }}
 
 CRITICAL RULES:
-- ALWAYS run verify_candidates.py as the first step.
-- Only include candidates that passed verification (no external references).
-- When in doubt about a candidate, EXCLUDE it (precision > recall).
+- Verify EVERY candidate from the analysis file. Do not skip any.
+- Barrel/index re-exports do NOT count as real usage.
 - Type should be one of: function, class, method, const, interface, variable.
-- Once REPORT.json is written with verified candidates, you are DONE."""
+- Once REPORT.json is written, you are DONE."""
 
     def _generate_baseline_problem_statement(self, task_cfg: dict) -> str:
         """Generate problem statement for the baseline (manual analysis) condition.
@@ -667,12 +556,7 @@ are better than false negatives for this analysis."""
                     logger.warning(
                         f"Split {total} candidates into {num_parts} parts for {instance_id}"
                     )
-                logger.info(f"Placed analysis at {analysis_path}")
-
-                # Place verification script for the agent to use
-                verify_path = Path(host_workdir) / "verify_candidates.py"
-                verify_path.write_text(VERIFY_SCRIPT)
-                logger.info(f"Placed verify script at {verify_path}")
+                logger.info(f"Placed analysis for {instance_id} ({total} candidates)")
             except Exception as e:
                 logger.error(f"Failed to get Supermodel analysis for {instance_id}: {e}")
                 print(
