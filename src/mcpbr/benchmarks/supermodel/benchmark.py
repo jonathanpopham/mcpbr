@@ -32,6 +32,117 @@ REPORT_PLACEHOLDER = """{
 }
 """
 
+VERIFY_SCRIPT = r'''#!/usr/bin/env python3
+"""Verify dead-code candidates by grepping for external references.
+
+Reads the analysis JSON (single file or manifest+parts), runs
+`grep -rlw <name> .` for each candidate, excludes matches in the
+candidate's own defining file, and outputs only candidates with
+zero external references to verified_candidates.json.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+TIMEOUT = 30  # seconds per grep call
+
+
+def load_candidates(analysis_path: str) -> list[dict]:
+    """Load candidates from a single file or manifest+parts."""
+    with open(analysis_path) as f:
+        data = json.load(f)
+
+    # Check if this is a manifest (has part_files)
+    if "part_files" in data:
+        candidates = []
+        base_dir = str(Path(analysis_path).parent)
+        for part_file in data["part_files"]:
+            part_path = os.path.join(base_dir, part_file)
+            with open(part_path) as pf:
+                part_data = json.load(pf)
+            for key in ("deadCodeCandidates", "candidates", "items"):
+                if key in part_data:
+                    candidates.extend(part_data[key])
+                    break
+        return candidates
+
+    # Single file: find the candidate list
+    for key in ("deadCodeCandidates", "candidates", "items"):
+        if key in data:
+            return data[key]
+
+    return []
+
+
+def has_external_references(name: str, defining_file: str) -> bool:
+    """Check if `name` appears in any file other than its defining file."""
+    try:
+        result = subprocess.run(
+            ["grep", "-rlw", name, "."],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        # Timeout = assume alive (safe default)
+        return True
+
+    if result.returncode != 0:
+        # grep found nothing
+        return False
+
+    # Normalize the defining file path for comparison
+    def_norm = defining_file.lstrip("./")
+    for line in result.stdout.strip().splitlines():
+        ref_norm = line.strip().lstrip("./")
+        if ref_norm != def_norm:
+            return True
+
+    return False
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <analysis.json> [--output <file>]", file=sys.stderr)
+        sys.exit(1)
+
+    analysis_path = sys.argv[1]
+    output_path = "verified_candidates.json"
+    if "--output" in sys.argv:
+        idx = sys.argv.index("--output")
+        if idx + 1 < len(sys.argv):
+            output_path = sys.argv[idx + 1]
+
+    candidates = load_candidates(analysis_path)
+    print(f"Loaded {len(candidates)} candidates from {analysis_path}", file=sys.stderr)
+
+    verified = []
+    for i, c in enumerate(candidates):
+        name = c.get("name", "")
+        file_path = c.get("file", "")
+        if not name or not file_path:
+            continue
+
+        if has_external_references(name, file_path):
+            print(f"  [{i+1}/{len(candidates)}] ALIVE: {name} in {file_path}", file=sys.stderr)
+        else:
+            print(f"  [{i+1}/{len(candidates)}] DEAD:  {name} in {file_path}", file=sys.stderr)
+            verified.append(c)
+
+    print(f"\nVerified {len(verified)}/{len(candidates)} candidates as dead", file=sys.stderr)
+
+    with open(output_path, "w") as f:
+        json.dump({"deadCodeCandidates": verified}, f, indent=2)
+    print(f"Wrote {output_path}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
 DEFAULT_GT_DIR = Path.home() / ".cache" / "mcpbr" / "supermodel_ground_truth"
 
 
@@ -49,7 +160,7 @@ class SupermodelBenchmark:
         self,
         analysis_type: str = "dead-code",
         tasks: list[dict[str, Any]] | None = None,
-        supermodel_api_base: str = "https://staging.api.supermodeltools.com",
+        supermodel_api_base: str = "https://api.supermodel.dev",
         supermodel_api_key: str | None = None,
         resolved_threshold: float = 0.8,
         ground_truth_dir: str | Path | None = None,
@@ -189,11 +300,52 @@ class SupermodelBenchmark:
 
         return gt
 
+    @staticmethod
+    def _score_and_cap_candidates(candidates: list[dict], max_count: int = 200) -> list[dict]:
+        """Score each candidate by heuristic confidence and return top N.
+
+        Higher score = more likely to be truly dead code.
+        """
+        import re
+
+        index_barrel_re = re.compile(r"(^|/)index\.(ts|js|tsx|jsx)$")
+        generated_re = re.compile(r"(^|/)(dist|build|\.next|__generated__|generated)/")
+
+        scored = []
+        for c in candidates:
+            score = 0
+            ctype = (c.get("type") or "").lower()
+            cfile = c.get("file") or ""
+            cname = c.get("name") or ""
+
+            # Functions and classes are higher signal
+            if ctype in ("function", "class", "method"):
+                score += 3
+            elif ctype in ("const", "variable"):
+                score += 2
+
+            # Non-index/barrel files are higher signal
+            if not index_barrel_re.search(cfile):
+                score += 2
+
+            # Non-generated paths
+            if not generated_re.search(cfile):
+                score += 1
+
+            # Specific names (longer = less likely to be a common pattern)
+            if len(cname) > 5:
+                score += 1
+
+            scored.append((score, c))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in scored[:max_count]]
+
     def _generate_enhanced_problem_statement(self, task_cfg: dict) -> str:
         """Generate problem statement for the enhanced (graph-assisted) condition.
 
-        The agent gets a pre-computed analysis JSON from a call graph analyzer.
-        Its job is to faithfully transcribe ALL candidates into REPORT.json.
+        The agent gets pre-computed analysis candidates plus a verification script.
+        Three-phase workflow: run verification, review results, write report.
         """
         language = task_cfg.get("language", "typescript")
         analysis_file = self._endpoint.analysis_filename
@@ -202,43 +354,56 @@ class SupermodelBenchmark:
 
         return f"""You are a code analyst. Find all dead code in this {language} codebase.
 
-A call graph analyzer has already analyzed this codebase and identified dead code
-candidates. The results are in `{analysis_file}`.
+A call graph analyzer has already identified dead code candidates in
+`{analysis_file}`. Your job is to VERIFY these candidates before reporting them.
 
-The analyzer uses full call graph reachability -- it traces which functions are
-actually called from entry points, not just whether a name appears in the code.
-This means its candidates ARE unreachable code. Trust the analyzer.
+Precision matters more than recall. Only include candidates you are confident about.
 
 IMPORTANT: Use the MCP filesystem tools (read_text_file, write_file) for ALL file
 I/O in this task. Do NOT use the built-in Read/Write tools.
 
-YOUR ONLY JOB:
+== PHASE 1: Run verification script ==
 
-1. Read `{analysis_file}` using the filesystem read_text_file tool.
-   The file is compact JSON with a `deadCodeCandidates` array.
-   Each entry has: file, name, type.
-2. Write REPORT.json using the filesystem write_file tool with EVERY candidate.
-   Do NOT filter, validate, or remove any candidates. Include ALL of them.
+ALWAYS run the verification script first:
 
-REPORT.json format:
+  python3 verify_candidates.py {analysis_file} --output verified_candidates.json
+
+This script greps for each candidate name across the codebase and removes
+candidates that have references outside their defining file. Wait for it to finish.
+
+If the script fails, manually verify each candidate:
+  For each candidate, run: grep -rlw '<name>' . --include='*{ext}'
+  If the name appears ONLY in its own defining file, it is dead.
+  If it appears in other files, it is alive — do NOT include it.
+
+== PHASE 2: Review verified candidates ==
+
+Read `verified_candidates.json` using the filesystem read_text_file tool.
+Quickly review the list. For suspicious items (very common/short names like
+"get", "set", "init", or candidates in generated/dist files), double-check:
+
+  grep -rn '<name>' . --include='*{ext}'
+
+Remove any candidate that has legitimate external callers.
+
+== PHASE 3: Write REPORT.json ==
+
+Write REPORT.json using the filesystem write_file tool with ONLY verified candidates:
+
 {{
   "dead_code": [
-    {{"file": "path/to/file{ext}", "name": "unusedFunc", "type": "function", "reason": "unreachable from entry points"}},
+    {{"file": "path/to/file{ext}", "name": "unusedFunc", "type": "function", "reason": "no external references found"}},
     ...
   ],
   "analysis_complete": true
 }}
 
-If the analysis file is too large for a single read, use Bash with jq:
-  jq '[.deadCodeCandidates[] | {{file, name, type, reason: "unreachable"}}]' {analysis_file} > /tmp/candidates.json
-  Then wrap it: jq '{{dead_code: ., analysis_complete: true}}' /tmp/candidates.json > REPORT.json
-
 CRITICAL RULES:
-- Include EVERY candidate from the analysis file. Do NOT skip any.
-- Do NOT investigate or validate candidates by reading source files.
-- Do NOT filter candidates based on your own judgment.
-- Your ONLY job is to faithfully transcribe candidates into REPORT.json.
-- Once REPORT.json is written, you are DONE. Stop immediately."""
+- ALWAYS run verify_candidates.py as the first step.
+- Only include candidates that passed verification (no external references).
+- When in doubt about a candidate, EXCLUDE it (precision > recall).
+- Type should be one of: function, class, method, const, interface, variable.
+- Once REPORT.json is written with verified candidates, you are DONE."""
 
     def _generate_baseline_problem_statement(self, task_cfg: dict) -> str:
         """Generate problem statement for the baseline (manual analysis) condition.
@@ -317,15 +482,12 @@ are better than false negatives for this analysis."""
         For baseline: clone repo at pre-merge commit, write REPORT.json placeholder.
         For MCP (enhanced): also call Supermodel API and place analysis JSON.
         """
-        # Swap problem_statement based on condition so the agent gets the right prompt
+        # Select the right prompt without mutating the shared task dict
         if is_mcp:
-            task["problem_statement"] = task.get(
-                "problem_statement_enhanced", task["problem_statement"]
-            )
+            problem_statement = task.get("problem_statement_enhanced", task["problem_statement"])
         else:
-            task["problem_statement"] = task.get(
-                "problem_statement_baseline", task["problem_statement"]
-            )
+            problem_statement = task.get("problem_statement_baseline", task["problem_statement"])
+        task = {**task, "problem_statement": problem_statement}
 
         instance_id = task["instance_id"]
         repo = task.get("repo", "")
@@ -356,21 +518,41 @@ are better than false negatives for this analysis."""
         host_workdir = temp_dir.name
 
         # Copy repo to workdir (scoped if needed)
+        # ignore_dangling_symlinks: skip broken symlinks (e.g. Cal.com .env)
         is_corpus = task.get("clone_url") is not None
         if scope_prefix:
             src_path = repo_dir / scope_prefix
             if src_path.is_dir():
                 if is_corpus:
                     # Corpus mode: scoped content goes to workdir root so GT paths match
-                    shutil.copytree(str(src_path), host_workdir, dirs_exist_ok=True)
+                    shutil.copytree(
+                        str(src_path),
+                        host_workdir,
+                        dirs_exist_ok=True,
+                        ignore_dangling_symlinks=True,
+                    )
                 else:
                     # PR mode: preserve directory structure for PR-relative paths
                     dest_path = Path(host_workdir) / scope_prefix
-                    shutil.copytree(str(src_path), str(dest_path))
+                    shutil.copytree(
+                        str(src_path),
+                        str(dest_path),
+                        ignore_dangling_symlinks=True,
+                    )
             else:
-                shutil.copytree(str(repo_dir), host_workdir, dirs_exist_ok=True)
+                shutil.copytree(
+                    str(repo_dir),
+                    host_workdir,
+                    dirs_exist_ok=True,
+                    ignore_dangling_symlinks=True,
+                )
         else:
-            shutil.copytree(str(repo_dir), host_workdir, dirs_exist_ok=True)
+            shutil.copytree(
+                str(repo_dir),
+                host_workdir,
+                dirs_exist_ok=True,
+                ignore_dangling_symlinks=True,
+            )
 
         # Write REPORT.json placeholder
         report_path = Path(host_workdir) / "REPORT.json"
@@ -401,8 +583,6 @@ are better than false negatives for this analysis."""
 
                 # Slim down the analysis for agent consumption:
                 # Keep only file/name/type per candidate (evaluation uses file+name).
-                # Use compact JSON to stay under MCP read_text_file token limits
-                # (~100K chars). At ~45 chars/entry, 2000 candidates ≈ 90KB.
                 keep_fields = {"file", "name", "type"}
                 for key in ("deadCodeCandidates", "candidates", "items"):
                     if key in analysis_json:
@@ -425,9 +605,71 @@ are better than false negatives for this analysis."""
                     if drop_key not in keep_top_keys:
                         analysis_json.pop(drop_key)
 
-                analysis_path = Path(host_workdir) / self._endpoint.analysis_filename
-                analysis_path.write_text(json.dumps(analysis_json, separators=(",", ":")))
+                # Split large candidate lists into multiple chunk files to stay
+                # under the 25K token tool output limit (~100K chars).
+                # At ~80 chars per {file,name,type} entry in compact JSON,
+                # 800 entries ≈ 64KB ≈ 16K tokens (safe margin under 25K).
+                max_per_file = 800
+                all_candidates = analysis_json.get(candidate_key, []) if candidate_key else []
+
+                # Cap candidates to limit agent workload and reduce false positives.
+                # Since 200 < 800, the output always fits in a single file after capping.
+                max_candidates = 200
+                if len(all_candidates) > max_candidates:
+                    logger.info(
+                        f"Capping {len(all_candidates)} candidates to {max_candidates} "
+                        f"for {instance_id}"
+                    )
+                    all_candidates = self._score_and_cap_candidates(all_candidates, max_candidates)
+                    if candidate_key:
+                        analysis_json[candidate_key] = all_candidates
+
+                total = len(all_candidates)
+
+                if total <= max_per_file:
+                    # Single file — fits in one read
+                    analysis_path = Path(host_workdir) / self._endpoint.analysis_filename
+                    analysis_path.write_text(json.dumps(analysis_json, separators=(",", ":")))
+                    logger.info(f"Placed analysis at {analysis_path} ({total} candidates)")
+                else:
+                    # Split into chunks and write a manifest
+                    num_parts = (total + max_per_file - 1) // max_per_file
+                    base_name = self._endpoint.analysis_filename.replace(".json", "")
+
+                    part_files = []
+                    for i in range(num_parts):
+                        start = i * max_per_file
+                        end = min(start + max_per_file, total)
+                        chunk = all_candidates[start:end]
+                        part_name = f"{base_name}_part{i + 1}.json"
+                        part_path = Path(host_workdir) / part_name
+                        part_data = {candidate_key: chunk}
+                        part_path.write_text(json.dumps(part_data, separators=(",", ":")))
+                        part_files.append(part_name)
+
+                    # Write manifest file with the original analysis filename
+                    manifest = {
+                        "total_candidates": total,
+                        "num_parts": num_parts,
+                        "candidates_per_part": max_per_file,
+                        "part_files": part_files,
+                        "note": (
+                            f"Analysis split into {num_parts} files of "
+                            f"{max_per_file} candidates each. "
+                            "Read ALL part files and include ALL candidates."
+                        ),
+                    }
+                    manifest_path = Path(host_workdir) / self._endpoint.analysis_filename
+                    manifest_path.write_text(json.dumps(manifest, separators=(",", ":")))
+                    logger.warning(
+                        f"Split {total} candidates into {num_parts} parts for {instance_id}"
+                    )
                 logger.info(f"Placed analysis at {analysis_path}")
+
+                # Place verification script for the agent to use
+                verify_path = Path(host_workdir) / "verify_candidates.py"
+                verify_path.write_text(VERIFY_SCRIPT)
+                logger.info(f"Placed verify script at {verify_path}")
             except Exception as e:
                 logger.error(f"Failed to get Supermodel analysis for {instance_id}: {e}")
                 print(

@@ -396,7 +396,7 @@ class TestSupermodelBenchmark:
 
         bm = SupermodelBenchmark()
         assert bm.analysis_type == "dead-code"
-        assert bm.api_base == "https://staging.api.supermodeltools.com"
+        assert bm.api_base == "https://api.supermodel.dev"
         assert bm.resolved_threshold == 0.8
         assert bm.name == "supermodel"
         assert bm.evaluate_without_patch is True
@@ -584,6 +584,66 @@ class TestSupermodelBenchmark:
         prompt = bm._generate_baseline_problem_statement({"language": "typescript"})
         assert "REPORT.json" in prompt
         assert "dead code" in prompt.lower()
+
+    def test_enhanced_prompt_mentions_verify(self) -> None:
+        from mcpbr.benchmarks.supermodel import SupermodelBenchmark
+
+        bm = SupermodelBenchmark()
+        prompt = bm._generate_enhanced_problem_statement({"language": "typescript"})
+        assert "verify_candidates.py" in prompt
+        assert "PHASE" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Candidate scoring and capping tests
+# ---------------------------------------------------------------------------
+
+
+class TestScoreAndCapCandidates:
+    """Test the _score_and_cap_candidates static method."""
+
+    def _make_candidate(
+        self, name: str = "someFunc", file: str = "src/utils.ts", ctype: str = "function"
+    ) -> dict:
+        return {"name": name, "file": file, "type": ctype}
+
+    def test_score_and_cap_limits_count(self) -> None:
+        from mcpbr.benchmarks.supermodel import SupermodelBenchmark
+
+        candidates = [self._make_candidate(name=f"func_{i}") for i in range(500)]
+        result = SupermodelBenchmark._score_and_cap_candidates(candidates, 200)
+        assert len(result) == 200
+
+    def test_score_prioritizes_functions(self) -> None:
+        from mcpbr.benchmarks.supermodel import SupermodelBenchmark
+
+        func = self._make_candidate(name="myFunction", ctype="function")
+        iface = self._make_candidate(name="myInterface", ctype="interface")
+        # Both in same file type, same name length — function should score higher
+        result = SupermodelBenchmark._score_and_cap_candidates([iface, func], 2)
+        assert result[0]["name"] == "myFunction"
+
+    def test_score_deprioritizes_index_files(self) -> None:
+        from mcpbr.benchmarks.supermodel import SupermodelBenchmark
+
+        index_candidate = self._make_candidate(
+            name="exportedThing", file="src/index.ts", ctype="function"
+        )
+        normal_candidate = self._make_candidate(
+            name="exportedThing", file="src/utils.ts", ctype="function"
+        )
+        result = SupermodelBenchmark._score_and_cap_candidates(
+            [index_candidate, normal_candidate], 2
+        )
+        # Normal file should rank higher (gets +2 for non-index)
+        assert result[0]["file"] == "src/utils.ts"
+
+    def test_cap_returns_all_when_under_limit(self) -> None:
+        from mcpbr.benchmarks.supermodel import SupermodelBenchmark
+
+        candidates = [self._make_candidate(name=f"func_{i}") for i in range(10)]
+        result = SupermodelBenchmark._score_and_cap_candidates(candidates, 200)
+        assert len(result) == 10
 
 
 # ---------------------------------------------------------------------------
