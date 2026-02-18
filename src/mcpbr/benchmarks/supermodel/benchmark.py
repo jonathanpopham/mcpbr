@@ -482,12 +482,15 @@ are better than false negatives for this analysis."""
         For baseline: clone repo at pre-merge commit, write REPORT.json placeholder.
         For MCP (enhanced): also call Supermodel API and place analysis JSON.
         """
-        # Select the right prompt without mutating the shared task dict
+        # Swap problem_statement based on condition so the agent gets the right prompt
         if is_mcp:
-            problem_statement = task.get("problem_statement_enhanced", task["problem_statement"])
+            task["problem_statement"] = task.get(
+                "problem_statement_enhanced", task["problem_statement"]
+            )
         else:
-            problem_statement = task.get("problem_statement_baseline", task["problem_statement"])
-        task = {**task, "problem_statement": problem_statement}
+            task["problem_statement"] = task.get(
+                "problem_statement_baseline", task["problem_statement"]
+            )
 
         instance_id = task["instance_id"]
         repo = task.get("repo", "")
