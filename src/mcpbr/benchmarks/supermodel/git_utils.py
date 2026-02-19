@@ -96,7 +96,9 @@ async def zip_repo(
 ) -> str:
     """Create a zip of the repo for Supermodel API.
 
-    Uses `zip` command with exclude patterns for fine-grained control.
+    Uses ``git archive`` when possible (recommended by Supermodel docs) since it
+    only includes tracked files and automatically respects .gitignore. Falls back
+    to ``zip -r`` with exclude patterns for non-git directories.
 
     Args:
         repo_dir: Path to the repository directory.
@@ -107,14 +109,62 @@ async def zip_repo(
     Returns:
         Path to the created zip file.
     """
+    import os
+
+    is_git = os.path.isdir(os.path.join(repo_dir, ".git"))
+
+    if is_git:
+        return await _zip_repo_git_archive(repo_dir, output_zip, scope_prefix)
+    else:
+        return await _zip_repo_fallback(repo_dir, output_zip, scope_prefix, exclude_patterns)
+
+
+async def _zip_repo_git_archive(
+    repo_dir: str,
+    output_zip: str,
+    scope_prefix: str | None = None,
+) -> str:
+    """Create zip using ``git archive`` — only includes tracked files."""
+    cmd = ["git", "archive", "--format=zip", "-o", output_zip, "HEAD"]
+    if scope_prefix:
+        cmd.append(scope_prefix)
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=repo_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git archive failed: {stderr.decode()}")
+    return output_zip
+
+
+async def _zip_repo_fallback(
+    repo_dir: str,
+    output_zip: str,
+    scope_prefix: str | None = None,
+    exclude_patterns: list[str] | None = None,
+) -> str:
+    """Fallback: create zip using ``zip -r`` with exclude patterns."""
     zip_target = scope_prefix if scope_prefix else "."
     base_excludes = [
         "node_modules/*",
         ".git/*",
         "dist/*",
         "build/*",
-        "*.pyc",
+        "target/*",
+        ".next/*",
         "__pycache__/*",
+        "*.pyc",
+        "venv/*",
+        ".venv/*",
+        "vendor/*",
+        ".idea/*",
+        ".vscode/*",
+        "coverage/*",
+        ".nyc_output/*",
     ]
     # Prepend scope_prefix to exclude patterns so they match archive paths
     prefixed_excludes = []
