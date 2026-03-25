@@ -51,7 +51,7 @@ class SupermodelBenchmark:
         tasks: list[dict[str, Any]] | None = None,
         supermodel_api_base: str = "https://api.supermodel.dev",
         supermodel_api_key: str | None = None,
-        resolved_threshold: float = 0.8,
+        resolved_threshold: float = 0.0,
         ground_truth_dir: str | Path | None = None,
         supermodel_api_timeout: int = 900,
         **kwargs: Any,
@@ -233,66 +233,15 @@ class SupermodelBenchmark:
     def _generate_enhanced_problem_statement(self, task_cfg: dict) -> str:
         """Generate problem statement for the enhanced (graph-assisted) condition.
 
-        The agent gets pre-computed analysis candidates and must manually verify
-        each one by grepping for references in the codebase.
+        Uses the v2 prompt if the endpoint provides one, otherwise falls back to
+        the original v1 prompt from the endpoint plugin.
         """
-        language = task_cfg.get("language", "typescript")
-        analysis_file = self._endpoint.analysis_filename
+        prompt = getattr(self._endpoint, "enhanced_prompt_v2", None)
+        if prompt:
+            return prompt
 
-        ext = ".ts" if language == "typescript" else ".py"
-
-        return f"""You are a code analyst. Find all dead code in this {language} codebase.
-
-A call graph analyzer has already identified dead code candidates in
-`{analysis_file}`. Your job is to VERIFY these candidates before reporting them.
-
-IMPORTANT: Use the MCP filesystem tools (read_text_file, write_file) for ALL file
-I/O in this task. Do NOT use the built-in Read/Write tools.
-
-== STEP 1: Read the candidates ==
-
-Read `{analysis_file}` to get the list of candidates. Each has a file, name, and type.
-
-== STEP 2: Verify each candidate ==
-
-For EACH candidate, search for its name across the codebase:
-
-  grep -rn '<name>' . --include='*{ext}'
-
-A candidate is DEAD if:
-- It appears ONLY in its own defining file (the "file" field), OR
-- The only other files referencing it are index/barrel files that just re-export it
-  (lines like `export {{ X }} from './...'` or `export * from './...'`)
-
-A candidate is ALIVE (do NOT report it) if:
-- It is imported and actually USED in another file (called, referenced in logic,
-  passed as an argument, etc.)
-- It appears in a config, route registration, or framework hook
-
-IMPORTANT: barrel/index files that merely re-export a symbol do NOT count as real
-usage. A symbol re-exported through index.ts but never actually imported and used
-by consuming code is still dead.
-
-When in doubt, INCLUDE the candidate — false positives are acceptable, but missing
-real dead code is worse.
-
-== STEP 3: Write REPORT.json ==
-
-Write REPORT.json using the filesystem write_file tool with verified candidates:
-
-{{
-  "dead_code": [
-    {{"file": "path/to/file{ext}", "name": "unusedFunc", "type": "function", "reason": "only referenced in own file"}},
-    ...
-  ],
-  "analysis_complete": true
-}}
-
-CRITICAL RULES:
-- Verify EVERY candidate from the analysis file. Do not skip any.
-- Barrel/index re-exports do NOT count as real usage.
-- Type should be one of: function, class, method, const, interface, variable.
-- Once REPORT.json is written, you are DONE."""
+        # Fallback: original v1 prompt from the endpoint plugin
+        return self._endpoint.enhanced_prompt
 
     def _generate_baseline_problem_statement(self, task_cfg: dict) -> str:
         """Generate problem statement for the baseline (manual analysis) condition.
@@ -310,41 +259,48 @@ CRITICAL RULES:
 - Middleware or handlers that are defined but never registered with the router
 - Methods on classes where the class itself is never instantiated from live code"""
 
-        return f"""You are a code analyst. Find all dead code in this {language} codebase.
+        return f"""You are a code analyst. Find dead code in this {language} codebase.
 
-IMPORTANT: Use the MCP filesystem tools (read_text_file, write_file) for ALL file
-I/O in this task. Do NOT use the built-in Read/Write tools.
+Dead code = exported functions, classes, methods, interfaces, and constants that
+are defined but never used in any meaningful execution path.
 
-Dead code = functions, classes, methods, and constants that are defined but never
-used in any meaningful execution path. This includes:
-- Functions/methods defined but never called from any entry point
-- Constants defined but never read by any live code
-- Functions that only call each other (dead clusters) with no external caller
 {lang_hints}
 
-YOUR JOB:
-1. List all source files (exclude test files from the dead code search -- tests
-   are consumers, not definitions to check).
-2. Read each non-test source file and identify all function, class, and constant
-   definitions.
-3. For each definition, trace whether it is reachable from an actual entry point
-   (main functions, module-level code that runs on import, framework callbacks).
-   A function that is only referenced by its own definition or by other dead
-   functions is still dead.
-4. Write your findings to REPORT.json using the filesystem write_file tool.
+== STRATEGY ==
+
+STEP 1: Get an overview of the codebase structure.
+  - List the top-level directories and key source files.
+  - Identify the main source directories (exclude node_modules, dist, build, tests).
+
+STEP 2: Scan source files for exported symbols.
+  - Focus on non-test, non-generated source files.
+  - For each file, note exported functions, classes, interfaces, constants.
+
+STEP 3: For each exported symbol, grep the codebase for references.
+  - If it only appears in its own definition file (and possibly tests or
+    barrel/index re-exports), it is likely dead.
+  - Barrel re-exports (index.ts) do NOT count as real usage.
+  - Type-only imports do NOT count as real usage.
+
+STEP 4: Write REPORT.json EARLY (after scanning even a few files).
+  - Write what you have so far, then continue scanning and UPDATE the file.
+  - This ensures you always produce output even if you run out of iterations.
 
 REPORT.json format:
 {{
   "dead_code": [
-    {{"file": "path/to/file{ext}", "name": "unusedFunc", "type": "function", "reason": "no callers from entry points"}},
+    {{"file": "path/to/file{ext}", "name": "unusedFunc", "type": "function", "reason": "no callers found"}},
     ...
   ],
   "analysis_complete": true
 }}
 
-Type should be one of: function, class, method, const, interface, variable.
-When in doubt about whether something is dead, INCLUDE it -- false positives
-are better than false negatives for this analysis."""
+CRITICAL RULES:
+- Type should be one of: function, class, method, const, interface, variable.
+- When in doubt about whether something is dead, INCLUDE it.
+- False positives are acceptable. Missing real dead code is NOT acceptable.
+- Write REPORT.json after analyzing each batch — do NOT wait until the end.
+- Prioritize breadth over depth: scan ALL source files before deep-diving any one."""
 
     def normalize_task(self, task: dict[str, Any]) -> BenchmarkTask:
         instance_id = task.get("instance_id", "unknown")
@@ -473,90 +429,148 @@ are better than false negatives for this analysis."""
                         strip_prefix=is_corpus,
                     )
 
-                # Slim down the analysis for agent consumption:
-                # Keep only file/name/type per candidate (evaluation uses file+name).
-                keep_fields = {"file", "name", "type"}
-                for key in ("deadCodeCandidates", "candidates", "items"):
-                    if key in analysis_json:
-                        items = analysis_json[key]
-                        items = [
-                            {k: v for k, v in item.items() if k in keep_fields} for item in items
-                        ]
-                        analysis_json[key] = items
+                # --- Build analysis package for agent consumption ---
+                # Keep reason + confidence so the agent can filter intelligently.
+                # Also preserve metadata summary and entry points.
+                keep_fields = {"file", "name", "type", "reason", "confidence"}
 
-                # Strip top-level keys the agent doesn't need.
-                # Keep only the candidate list; drop metadata, aliveCode,
-                # entryPoints, sourceCode, ast, rawGraph, etc.
+                # Find the candidate key
                 candidate_key = None
                 for k in ("deadCodeCandidates", "candidates", "items"):
                     if k in analysis_json:
                         candidate_key = k
                         break
-                keep_top_keys = {candidate_key} if candidate_key else set()
-                for drop_key in list(analysis_json.keys()):
-                    if drop_key not in keep_top_keys:
-                        analysis_json.pop(drop_key)
 
-                # Split large candidate lists into multiple chunk files to stay
-                # under the 25K token tool output limit (~100K chars).
-                # At ~80 chars per {file,name,type} entry in compact JSON,
-                # 800 entries ≈ 64KB ≈ 16K tokens (safe margin under 25K).
-                max_per_file = 800
                 all_candidates = analysis_json.get(candidate_key, []) if candidate_key else []
 
-                # Cap candidates to limit agent workload and reduce false positives.
-                # Since 200 < 800, the output always fits in a single file after capping.
-                max_candidates = 200
-                if len(all_candidates) > max_candidates:
+                # Extract metadata and entry points early (needed for filtering)
+                metadata = analysis_json.get("metadata", {})
+
+                # Pre-filter type/interface candidates (high FP rate from structural typing)
+                type_interface_reasons = (
+                    "Type/interface with no references",
+                    "Type with no references",
+                    "Interface with no references",
+                )
+                before_count = len(all_candidates)
+                all_candidates = [
+                    c for c in all_candidates
+                    if not any(
+                        str(c.get("reason", "")).startswith(r) for r in type_interface_reasons
+                    )
+                ]
+                type_filtered = before_count - len(all_candidates)
+                if type_filtered:
                     logger.info(
-                        f"Capping {len(all_candidates)} candidates to {max_candidates} "
-                        f"for {instance_id}"
+                        f"Pre-filtered {type_filtered} type/interface candidates for {instance_id}"
                     )
-                    all_candidates = self._score_and_cap_candidates(all_candidates, max_candidates)
-                    if candidate_key:
-                        analysis_json[candidate_key] = all_candidates
 
-                total = len(all_candidates)
+                # NOTE: Cannot filter by reason — "Exported but file never imported"
+                # contains both true positives AND false positives when
+                # rootFilesCount is high. 16/20 GT items in tyr have this reason.
+                # The signal is polluted at the parser level (import resolution
+                # failure tags real dead code with the same reason as framework-
+                # wired code). See issue #676 for details.
+                root_files = metadata.get("rootFilesCount", 0) or 0
+                reason_filtered = 0
 
-                if total <= max_per_file:
-                    # Single file — fits in one read
-                    analysis_path = Path(host_workdir) / self._endpoint.analysis_filename
-                    analysis_path.write_text(json.dumps(analysis_json, separators=(",", ":")))
-                    logger.info(f"Placed analysis at {analysis_path} ({total} candidates)")
+                # Build entry point set for cross-reference filtering
+                ep_set = set()
+                for ep in analysis_json.get("entryPoints", []):
+                    ep_file = ep.get("file", "")
+                    ep_name = ep.get("name", "")
+                    if ep_file and ep_name:
+                        ep_set.add((ep_file, ep_name))
+
+                # Drop candidates that match entry points
+                if ep_set:
+                    before_ep = len(all_candidates)
+                    all_candidates = [
+                        c for c in all_candidates
+                        if (c.get("file", ""), c.get("name", "")) not in ep_set
+                    ]
+                    ep_filtered = before_ep - len(all_candidates)
+                    if ep_filtered:
+                        logger.info(
+                            f"Filtered {ep_filtered} entry point matches for {instance_id}"
+                        )
                 else:
-                    # Split into chunks and write a manifest
-                    num_parts = (total + max_per_file - 1) // max_per_file
-                    base_name = self._endpoint.analysis_filename.replace(".json", "")
+                    ep_filtered = 0
 
-                    part_files = []
-                    for i in range(num_parts):
-                        start = i * max_per_file
-                        end = min(start + max_per_file, total)
-                        chunk = all_candidates[start:end]
-                        part_name = f"{base_name}_part{i + 1}.json"
-                        part_path = Path(host_workdir) / part_name
-                        part_data = {candidate_key: chunk}
-                        part_path.write_text(json.dumps(part_data, separators=(",", ":")))
-                        part_files.append(part_name)
+                # Slim candidates to keep_fields
+                slimmed = [
+                    {k: v for k, v in c.items() if k in keep_fields} for c in all_candidates
+                ]
 
-                    # Write manifest file with the original analysis filename
-                    manifest = {
-                        "total_candidates": total,
-                        "num_parts": num_parts,
-                        "candidates_per_part": max_per_file,
-                        "part_files": part_files,
-                        "note": (
-                            f"Analysis split into {num_parts} files of "
-                            f"{max_per_file} candidates each. "
-                            "Read ALL part files and include ALL candidates."
-                        ),
+                # Build metadata summary for the agent
+                from collections import Counter
+                reason_counts = Counter(c.get("reason", "") for c in all_candidates)
+                confidence_counts = Counter(c.get("confidence", "") for c in all_candidates)
+                entry_points = analysis_json.get("entryPoints", [])
+
+                metadata_summary = {
+                    "totalCandidates": before_count,
+                    "includedCandidates": len(slimmed),
+                    "prefilteredTypeInterfaces": type_filtered,
+                    "reasonFiltered": reason_filtered,
+                    "entryPointFiltered": ep_filtered,
+                    "rootFilesCount": root_files,
+                    "reasonBreakdown": dict(reason_counts.most_common()),
+                    "confidenceBreakdown": dict(confidence_counts.most_common()),
+                }
+
+                # Slim entry points for the whitelist
+                ep_keep = {"file", "name", "type", "reason"}
+                slim_entry_points = [
+                    {k: v for k, v in ep.items() if k in ep_keep}
+                    for ep in entry_points[:200]
+                ]
+
+                # Chunk candidates into files of max 200 each (~150 chars/entry
+                # with reason+confidence = ~30K chars = ~7.5K tokens per chunk).
+                # Must stay under 10K token read limit.
+                max_per_file = 200
+                total = len(slimmed)
+
+                base_name = self._endpoint.analysis_filename.replace(".json", "")
+                chunk_refs = []
+                for i in range(0, max(total, 1), max_per_file):
+                    chunk_num = i // max_per_file + 1
+                    chunk = slimmed[i : i + max_per_file]
+                    if not chunk:
+                        break
+                    chunk_name = f"{base_name}_chunk_{chunk_num:03d}.json"
+                    chunk_path = Path(host_workdir) / chunk_name
+
+                    # Per-chunk metadata
+                    chunk_reasons = Counter(c.get("reason", "") for c in chunk)
+                    chunk_data = {
+                        "chunk": chunk_num,
+                        "candidateCount": len(chunk),
+                        "reasonBreakdown": dict(chunk_reasons.most_common()),
+                        "deadCodeCandidates": chunk,
                     }
-                    manifest_path = Path(host_workdir) / self._endpoint.analysis_filename
-                    manifest_path.write_text(json.dumps(manifest, separators=(",", ":")))
-                    logger.warning(
-                        f"Split {total} candidates into {num_parts} parts for {instance_id}"
-                    )
-                logger.info(f"Placed analysis for {instance_id} ({total} candidates)")
+                    chunk_path.write_text(json.dumps(chunk_data, separators=(",", ":")))
+                    chunk_refs.append({
+                        "file": chunk_name,
+                        "candidateCount": len(chunk),
+                    })
+
+                # Write the index file (what the agent reads first)
+                index_data = {
+                    "metadataSummary": metadata_summary,
+                    "chunkFiles": chunk_refs,
+                    "entryPoints": slim_entry_points,
+                }
+                index_path = Path(host_workdir) / self._endpoint.analysis_filename
+                index_path.write_text(json.dumps(index_data, indent=2))
+
+                logger.info(
+                    f"Placed analysis for {instance_id}: {total} candidates "
+                    f"in {len(chunk_refs)} chunks, {len(slim_entry_points)} entry points "
+                    f"(filtered: {type_filtered} types, {reason_filtered} file-never-imported, "
+                    f"{ep_filtered} entry points)"
+                )
             except Exception as e:
                 logger.error(f"Failed to get Supermodel analysis for {instance_id}: {e}")
                 print(

@@ -42,6 +42,7 @@ def _clone_or_update_corpus(corpus_path: Path | None = None) -> Path:
             cwd=corpus_dir,
             capture_output=True,
             check=False,
+            timeout=120,
         )
     else:
         # Clone fresh
@@ -53,12 +54,14 @@ def _clone_or_update_corpus(corpus_path: Path | None = None) -> Path:
             ["git", "clone", "--quiet", CORPUS_REPO, str(corpus_dir)],
             capture_output=True,
             check=False,
+            timeout=120,
         )
         if result.returncode != 0:
             subprocess.run(
                 ["git", "clone", "--quiet", CORPUS_HTTPS, str(corpus_dir)],
                 capture_output=True,
                 check=True,
+                timeout=120,
             )
 
     return corpus_dir
@@ -125,15 +128,22 @@ class DeadCodeBenchmark:
 
     name = "dead-code"
 
-    def __init__(self, dataset: str | Path = "", corpus_path: str | Path | None = None):
+    def __init__(
+        self,
+        dataset: str | Path = "",
+        corpus_path: str | Path | None = None,
+        resolved_threshold: float = 0.0,
+    ):
         """Initialize the benchmark.
 
         Args:
             dataset: Path to a JSON dataset file (legacy, optional).
             corpus_path: Path to cached corpus directory. If None, uses default cache.
+            resolved_threshold: P/R threshold to consider a task resolved.
         """
         self.dataset = dataset
         self.corpus_path = Path(corpus_path) if corpus_path else None
+        self.resolved_threshold = resolved_threshold
         self._tasks: list[dict[str, Any]] | None = None
         self._corpus_dir: Path | None = None
 
@@ -146,6 +156,19 @@ class DeadCodeBenchmark:
         filter_category: list[str] | None = None,
         filter_tags: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        """Load and filter dead code benchmark tasks from the corpus.
+
+        Args:
+            sample_size: Maximum number of tasks to return.
+            task_ids: Specific task instance IDs to include.
+            _level: Unused (kept for interface compatibility).
+            filter_difficulty: Filter by difficulty level (e.g. ['easy', 'hard']).
+            filter_category: Filter by language category.
+            filter_tags: Unused tag filter.
+
+        Returns:
+            List of task dicts with problem_statement and metadata.
+        """
         _ = filter_tags
         tasks = self._load_raw_tasks()
 
@@ -196,6 +219,14 @@ class DeadCodeBenchmark:
         return self._tasks
 
     def normalize_task(self, task: dict[str, Any]) -> BenchmarkTask:
+        """Normalize a raw task dict into a BenchmarkTask.
+
+        Args:
+            task: Raw task dict from load_tasks.
+
+        Returns:
+            BenchmarkTask with standardized fields.
+        """
         instance_id = task.get("instance_id", "unknown")
         problem_statement = self._generate_problem_statement(task)
 
@@ -260,6 +291,16 @@ Rules:
         docker_manager: DockerEnvironmentManager,
         is_mcp: bool = False,
     ) -> TaskEnvironment:
+        """Create an isolated Docker environment for a dead code detection task.
+
+        Args:
+            task: Task dict containing repo_content and mcp_only_content.
+            docker_manager: Docker environment manager for container lifecycle.
+            is_mcp: If True, include pre-computed analysis files in the workspace.
+
+        Returns:
+            TaskEnvironment with the workspace mounted and git initialized.
+        """
         instance_id = task.get("instance_id", "unknown")
         repo_content = task.get("repo_content", {})
         mcp_only_content = task.get("mcp_only_content", {})
@@ -315,25 +356,32 @@ Rules:
         )
 
         # Init git so modifications are tracked
-        subprocess.run(["git", "init"], cwd=host_workdir, capture_output=True, check=False)
+        subprocess.run(
+            ["git", "init"], cwd=host_workdir, capture_output=True, check=False, timeout=30
+        )
         subprocess.run(
             ["git", "config", "user.email", "mcpbr@test.com"],
             cwd=host_workdir,
             capture_output=True,
             check=False,
+            timeout=10,
         )
         subprocess.run(
             ["git", "config", "user.name", "MCPBR"],
             cwd=host_workdir,
             capture_output=True,
             check=False,
+            timeout=10,
         )
-        subprocess.run(["git", "add", "-A"], cwd=host_workdir, capture_output=True, check=False)
+        subprocess.run(
+            ["git", "add", "-A"], cwd=host_workdir, capture_output=True, check=False, timeout=30
+        )
         subprocess.run(
             ["git", "commit", "-m", "Initial"],
             cwd=host_workdir,
             capture_output=True,
             check=False,
+            timeout=30,
         )
 
         return env
@@ -377,7 +425,7 @@ Rules:
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
-        resolved = precision >= 0.8 and recall >= 0.8
+        resolved = precision >= self.resolved_threshold and recall >= self.resolved_threshold
 
         # Log results for visibility
         print(f"\n{'=' * 50}")
